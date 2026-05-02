@@ -35,6 +35,7 @@ let player, bullets, asteroids, particles, shockwaves;
 let shakeX = 0, shakeY = 0, shakeDur = 0, shakeMag = 0;
 let shootCooldown = 0, spawnTimer = 0, spawnInterval = 3.0;
 let waveCount = 0, waveComplete = false, waveTimer = 0, waveJustStarted = false;
+let pendingSpawnCount = 0; // asteroids still queued in setTimeouts for the current wave
 let orbitRadius = 200, orbitAngle = -Math.PI / 2, orbitSpeed = 2.2;
 let bgStars;
 let wellPulse = 0;
@@ -183,6 +184,7 @@ function startGame() {
   waveComplete = false;
   waveTimer = 0;
   waveJustStarted = false;
+  pendingSpawnCount = 0;
   wellPulse = 0;
   flashColor = '#fff';
   flashAlpha = 0;
@@ -223,9 +225,14 @@ function spawnWave() {
   waveJustStarted = true; // block wave-complete re-detection until first asteroid arrives
   // Softer wave scaling: fewer asteroids per wave, stagger spawns more
   const count = 2 + Math.floor(level * 1.2) + Math.floor(Math.random() * 2);
+  pendingSpawnCount = count; // track queued spawns so fast kills don't falsely complete the wave
   const myGameId = gameId;
   for (let i = 0; i < count; i++) {
-    setTimeout(() => { if (gameId === myGameId) spawnAsteroid(); }, i * 600);
+    setTimeout(() => {
+      if (gameId !== myGameId) return;
+      pendingSpawnCount = Math.max(0, pendingSpawnCount - 1);
+      spawnAsteroid();
+    }, i * 600);
   }
   waveCount = count;
 }
@@ -432,8 +439,10 @@ function update(now) {
     const dist = Math.hypot(dx, dy);
     // Weaker gravity so asteroids don't rocket-accelerate into the player
     const gravStrength = 80 + level * 5;
-    a.vx += (dx / dist) * gravStrength * dt;
-    a.vy += (dy / dist) * gravStrength * dt;
+    if (dist > 0) {
+      a.vx += (dx / dist) * gravStrength * dt;
+      a.vy += (dy / dist) * gravStrength * dt;
+    }
     a.x += a.vx * dt;
     a.y += a.vy * dt;
     a.rot += a.rotSpeed * dt;
@@ -577,7 +586,8 @@ function update(now) {
   if (waveJustStarted && asteroids.length > 0) {
     waveJustStarted = false; // wave has population — safe to watch for completion
   }
-  if (asteroids.length === 0 && !waveComplete && !waveJustStarted) {
+  // Only mark wave complete when ALL queued spawns have fired AND no asteroids remain
+  if (asteroids.length === 0 && !waveComplete && !waveJustStarted && pendingSpawnCount === 0) {
     waveComplete = true;
     waveTimer = 2.5;
   }
@@ -698,8 +708,8 @@ function drawPlayer() {
 
   if (!player.alive) return;
 
-  // Blink when invincible
-  if (player.invincible > 0 && Math.floor(player.invincible * 8) % 2 === 0) return;
+  // Blink when invincible — skip on pause so the ship isn't frozen invisible on the pause screen
+  if (state !== STATE.PAUSED && player.invincible > 0 && Math.floor(player.invincible * 8) % 2 === 0) return;
 
   ctx.save();
   ctx.translate(player.x, player.y);
@@ -859,11 +869,10 @@ function drawHUD() {
       const h = 28;
       const w = h * aspect;
       ctx.save();
-      if (i < lives) {
-        ctx.globalCompositeOperation = 'lighter';
-      } else {
-        ctx.globalAlpha = 0.18;
-      }
+      ctx.globalCompositeOperation = 'lighter';
+      // Active lives: full brightness; dead lives: dim via alpha so the dark PNG
+      // background still vanishes (source-over at low alpha would show the black rect)
+      ctx.globalAlpha = i < lives ? 1.0 : 0.25;
       ctx.drawImage(shipImg, -w / 2, -h * 0.55, w, h);
       ctx.restore();
     } else {
@@ -882,7 +891,8 @@ function drawHUD() {
   if (combo >= 2) {
     const t = comboTimer / 2.5;
     ctx.globalAlpha = Math.min(1, t * 3);
-    ctx.font = `bold ${24 + combo * 3}px "Courier New"`;
+    const comboFontSize = Math.min(72, 24 + combo * 3); // cap so text never overflows screen
+    ctx.font = `bold ${comboFontSize}px "Courier New"`;
     ctx.textAlign = 'center';
     const colors = ['#fff', '#ff0', '#f80', '#f40', '#f0f'];
     ctx.fillStyle = colors[Math.min(combo - 1, colors.length - 1)];
@@ -971,7 +981,9 @@ function drawGameOver() {
   ctx.fillText(`WAVE REACHED: ${level}`, W / 2, H / 2 + 25);
   ctx.fillText(`BEST COMBO: x${comboMax}`, W / 2, H / 2 + 55);
 
-  if (score >= highScore) {
+  if (score > 0 && score === highScore) {
+    // highScore was already updated in the GAMEOVER timeout before setState(GAMEOVER),
+    // so equality means this run set the new record.
     ctx.font = 'bold 22px "Courier New"';
     ctx.fillStyle = '#ff0';
     ctx.fillText('NEW HIGH SCORE!', W / 2, H / 2 + 95);
